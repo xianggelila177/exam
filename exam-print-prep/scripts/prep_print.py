@@ -180,7 +180,8 @@ def apply_ink_save(im, ink_limit=0.45, radius=15):
     做法是先高斯模糊定位“大面积深色”，再只对这些区域做墨量限制；
     细小的文字因为模糊后平均亮度变高，不会被误判为大面积深色。
     """
-    g = np.asarray(im.convert("L"), dtype=np.float32)
+    arr = np.asarray(im.convert("RGB"), dtype=np.float32)
+    g = arr.mean(axis=2)
     blurred = np.asarray(
         Image.fromarray(g.astype(np.uint8)).filter(ImageFilter.GaussianBlur(radius)),
         dtype=np.float32,
@@ -188,9 +189,12 @@ def apply_ink_save(im, ink_limit=0.45, radius=15):
     large_dark = blurred < 128
     if not large_dark.any():
         return im
-    g2 = g.copy()
-    g2[large_dark] = 255.0 - (255.0 - g[large_dark]) * ink_limit
-    return Image.fromarray(g2.astype(np.uint8)).convert("RGB")
+    # 大面积深色区域映射到指定墨量（保留暗部形状，颜色转灰以省墨）；
+    # 非大面积深色区域保持原样，细笔画/彩色内容不受影响。
+    dark_gray = 255.0 - (255.0 - g) * ink_limit
+    mask = np.repeat(large_dark[:, :, None], 3, axis=2)
+    arr = np.where(mask, np.repeat(dark_gray[:, :, None], 3, axis=2), arr)
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
 
 def enhance(im, target_w, sharpen, contrast, radius, threshold, grayscale,
