@@ -442,6 +442,9 @@ def cmd_split(args):
     made = []
     for f in files:
         stem = os.path.splitext(os.path.basename(f))[0]
+        parent = os.path.basename(os.path.dirname(os.path.abspath(f)))
+        if parent and parent not in (".", os.path.sep):
+            stem = f"{parent}_{stem}"
         with Image.open(f) as opened:
             im = opened.convert("RGB")
             w, h = im.size
