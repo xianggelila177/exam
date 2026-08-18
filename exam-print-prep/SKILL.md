@@ -30,7 +30,7 @@ python3 scripts/prep_print.py --help
 
 ## 工作流
 
-四步走，不要跳过前两步。
+四步走，不要跳过前三步。
 
 ### 第 1 步：survey — 先看清楚手里是什么
 
