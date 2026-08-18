@@ -467,6 +467,99 @@ def cmd_verify(args):
                      ensure_ascii=False, indent=2))
 
 
+# ---------------------------------------------------------------- detect-ui
+
+
+def _connected_blocks(snw, min_area, run_gap):
+    """把"静止且非白"像素按行聚成矩形块，返回 [(x0,y0,x1,y1)]。
+
+    行与行间隔 <= run_gap 视为同一块；块的列范围取块内所有非白列的外接矩形。
+    """
+    h, w = snw.shape
+    rows_with = np.where(snw.any(axis=1))[0]
+    if not rows_with.size:
+        return []
+    bands = []
+    start = prev = int(rows_with[0])
+    for r in rows_with[1:]:
+        r = int(r)
+        if r - prev > run_gap:
+            bands.append((start, prev + 1))
+            start = r
+        prev = r
+    bands.append((start, prev + 1))
+
+    rects = []
+    for (y0, y1) in bands:
+        cols = np.where(snw[y0:y1].any(axis=0))[0]
+        if not cols.size:
+            continue
+        x0, x1 = int(cols[0]), int(cols[-1]) + 1
+        if (x1 - x0) * (y1 - y0) >= min_area:
+            rects.append((x0, y0, x1, y1))
+    return rects
+
+
+def cmd_detect_ui(args):
+    """检测一批同源截图里位置固定的 UI 元素，输出 build 可用的 --mask 参数。
+
+    原理：同一 App 同一设备截出的图，状态栏/标签栏/dock/悬浮页码胶囊等 UI
+    元素位置逐像素固定，正文每页不同。对每个像素算跨图标准差与均值，
+    "跨页静止(std小) 且 非白(mean低)" 的像素即候选 UI，聚成矩形块。
+
+    候选块再按"块内跨页变化像素的占比"分级：
+    - 变化占比低 -> 高置信 UI（状态栏/dock/标签栏），自动给出 --mask 涂白；
+    - 变化占比高 -> 可能是压在正文上的半透明水印（涂白会误伤正文），
+      或压住了每页页码的悬浮胶囊，仅列出坐标供人工确认，默认不涂白。
+    """
+    files = collect(args.inputs, dedupe=args.dedupe)
+    if len(files) < 3:
+        sys.exit("detect-ui 至少需要 3 张同源截图才能区分固定 UI 与变化正文")
+
+    imgs = []
+    size = None
+    for f in files:
+        with Image.open(f) as im:
+            a = np.asarray(im.convert("L"), dtype=np.float32)
+        if size is None:
+            size = a.shape
+        elif a.shape != size:
+            sys.exit("图片尺寸不一致（%s 是 %s，期望 %s），detect-ui 要求同源同尺寸"
+                     % (os.path.basename(f), a.shape, size))
+        imgs.append(a)
+    stack = np.stack(imgs)
+    std = stack.std(axis=0)
+    mean = stack.mean(axis=0)
+    h, w = std.shape
+
+    static = std < args.static_thresh
+    nonwhite = mean < args.white_thresh
+    changing = nonwhite & (~static)
+
+    blocks = _connected_blocks(static & nonwhite, args.min_area, args.run_gap)
+
+    auto, review = [], []
+    for (x0, y0, x1, y1) in blocks:
+        area = (x1 - x0) * (y1 - y0)
+        churn = int(changing[y0:y1, x0:x1].sum())
+        ratio = churn / area
+        box = [x0, y0, x1, y1]
+        (review if ratio > args.review_churn else auto).append(
+            {"box": box, "churn_ratio": round(ratio, 3)})
+
+    cmd = ["--mask %d,%d,%d,%d" % tuple(b["box"]) for b in auto]
+    print(json.dumps({
+        "count": len(files),
+        "image_size": [int(w), int(h)],
+        "auto_mask": [b["box"] for b in auto],
+        "review": review,
+        "suggested_args": " ".join(cmd),
+        "note": "auto_mask 是高置信 UI，已并入 suggested_args 供 build 直接涂白；"
+                "review 里的块含较多跨页变化内容（可能是压在正文上的水印或盖着页码的"
+                "胶囊），涂白会误伤，请逐个确认后手动追加 --mask。",
+    }, ensure_ascii=False, indent=2))
+
+
 # ---------------------------------------------------------------- split
 
 
@@ -584,6 +677,22 @@ def main():
     v.add_argument("--cell-height", type=int, default=566)
     v.add_argument("--edge-min", type=int, default=200)
     v.set_defaults(func=cmd_verify)
+
+    du = sub.add_parser("detect-ui",
+                        help="检测同源截图里位置固定的 UI 元素，输出 build 可用的 --mask")
+    du.add_argument("inputs", nargs="+", help="图片/目录/zip（需≥3张同尺寸同源截图）")
+    du.add_argument("--static-thresh", type=float, default=10.0,
+                    help="跨图像素标准差低于此值算『静止』，默认 10")
+    du.add_argument("--white-thresh", type=float, default=245.0,
+                    help="均值低于此值算『非白』，默认 245")
+    du.add_argument("--min-area", type=int, default=800,
+                    help="UI 块的最小面积(像素)，默认 800")
+    du.add_argument("--run-gap", type=int, default=6,
+                    help="行块合并的最大间隔，默认 6")
+    du.add_argument("--review-churn", type=float, default=0.15,
+                    help="块内变化像素占比超过此值则只列出不涂白，默认 0.15")
+    du.add_argument("--dedupe", action="store_true")
+    du.set_defaults(func=cmd_detect_ui)
 
     sp = sub.add_parser("split", help="横屏双页图按中缝切分为两页")
     sp.add_argument("inputs", nargs="+", help="图片/目录/zip")
