@@ -162,6 +162,38 @@ def find_page(im, thresh=150, margin=0):
     return (l, t, r, b)
 
 
+def parse_box(text):
+    """解析 'x0,y0,x1,y1' 形式的矩形参数，返回 int 四元组。"""
+    parts = [p.strip() for p in text.split(",")]
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError(
+            "矩形参数必须是 x0,y0,x1,y1 四个整数，得到: %r" % text)
+    try:
+        box = tuple(int(p) for p in parts)
+    except ValueError:
+        raise argparse.ArgumentTypeError("矩形参数含非整数: %r" % text)
+    if box[2] <= box[0] or box[3] <= box[1]:
+        raise argparse.ArgumentTypeError("矩形右下角必须大于左上角: %r" % text)
+    return box
+
+
+def apply_masks(im, masks):
+    """把一组矩形区域涂成纯白，用于去除悬浮在纸面上的 UI（页码胶囊、悬浮按钮等）。
+
+    坐标在传入图像自身的坐标系里，越界部分自动截断。
+    """
+    if not masks:
+        return im
+    a = np.asarray(im.convert("RGB")).copy()
+    h, w = a.shape[:2]
+    for (x0, y0, x1, y1) in masks:
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(w, x1), min(h, y1)
+        if x1 > x0 and y1 > y0:
+            a[y0:y1, x0:x1] = 255
+    return Image.fromarray(a)
+
+
 def apply_whitepoint(im, whitepoint):
     """把亮度 >= whitepoint 的像素推成纯白，低于阈值的像素保持不变。"""
     if whitepoint >= 255:
@@ -328,7 +360,12 @@ def cmd_build(args):
         with Image.open(f) as opened:
             im = opened.convert("RGB")
             before = im.size
-            if not args.no_crop:
+            # 遮罩在裁剪之前做：遮罩坐标基于原始截图，先把悬浮 UI 涂白再裁纸面。
+            if args.mask:
+                im = apply_masks(im, args.mask)
+            if args.crop_box:
+                im = im.crop(args.crop_box)
+            elif not args.no_crop:
                 im = im.crop(find_page(im, args.thresh, args.margin))
             # 黑边自检在加 A4 白边之前做，否则白画布边缘会掩盖黑边残留。
             edge_check_im = im
@@ -520,6 +557,13 @@ def main():
     b.add_argument("--margin", type=int, default=0, help="裁剪框再向内收 N 像素")
     b.add_argument("--thresh", type=int, default=150)
     b.add_argument("--edge-min", type=int, default=200, help="四边平均亮度低于此值就报警")
+    b.add_argument("--crop-box", type=parse_box, default=None, metavar="X0,Y0,X1,Y1",
+                   help="强制裁剪框（原图坐标），优先级高于 find_page/--no-crop；"
+                        "用于浅色阅读器 UI 等亮度法识别不了的固定版式")
+    b.add_argument("--mask", type=parse_box, action="append", default=None,
+                   metavar="X0,Y0,X1,Y1",
+                   help="把矩形区域涂白（原图坐标），可多次指定；"
+                        "用于去除悬浮在纸面中间的页码胶囊、悬浮按钮等 UI")
     b.add_argument("--no-crop", action="store_true")
     b.add_argument("--no-pdf", action="store_true")
     b.add_argument("--fit-a4", dest="fit_a4", action="store_true", default=True,
